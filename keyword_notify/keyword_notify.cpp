@@ -102,9 +102,27 @@ void notify_keyword(TCHAR *path, unsigned int path_len, TCHAR *keyword, unsigned
 		return;
 	}
 
-	// oh shit, 1st param must be directory
+	TCHAR drive[_MAX_DRIVE] = { 0 };
+	TCHAR dir[_MAX_DIR] = { 0 };
+	errno_t err = 0;
+	err = _tsplitpath_s(path, drive, _MAX_DRIVE, dir, _MAX_DIR, NULL, 0, NULL, 0);
+	if (0 != err)
+	{
+		_tprintf(L"_tsplitpath_s error: %d\n", err);
+		return;
+	}
+
+	TCHAR target_dir[_MAX_FNAME] = { 0 };
+	_tcscpy_s(target_dir, drive);
+	_tcscat_s(target_dir, dir);
+
+	struct _stat last_stat = { 0 };
+	_tstat(path, &last_stat);
+
+	_off_t file_size = last_stat.st_size;
+
 	HANDLE h = INVALID_HANDLE_VALUE;
-	h = FindFirstChangeNotification(path, FALSE, FILE_NOTIFY_CHANGE_LAST_WRITE);
+	h = FindFirstChangeNotification(target_dir, FALSE, FILE_NOTIFY_CHANGE_SIZE);
 	if (INVALID_HANDLE_VALUE == h)
 	{
 		_tprintf(L"FindFirstChangeNotification error: %d\n", GetLastError());
@@ -114,7 +132,42 @@ void notify_keyword(TCHAR *path, unsigned int path_len, TCHAR *keyword, unsigned
 	while (true)
 	{
 		WaitForSingleObject(h, INFINITE);
-		_tprintf(L"notification: file changed\n");
+
+		// need to sleep before call _tstat, or open the file will fail
+		Sleep(50);
+
+		struct _stat new_stat = { 0 };
+		_tstat(path, &new_stat);
+
+		if (file_size != new_stat.st_size)
+		{
+			_tprintf(L"%s changed, new size: %d\n", path, new_stat.st_size);
+
+			FILE *fp = NULL;
+			errno_t err = 0;
+			err = _tfopen_s(&fp, path, L"r");
+			if (0 != err)
+			{
+				// why sometimes error 13 (Permission denied)?
+				_tprintf(L"_tfopen_s error: %d\n", err);
+				continue;
+			}
+
+			fseek(fp, file_size, SEEK_SET);
+
+			TCHAR buff[1024] = { 0 };
+
+			while (!feof(fp))
+			{
+				_fgetts(buff, 1024, fp);
+
+				if (_tcsstr(buff, keyword))
+					_tprintf(L"found \"%s\"\n", buff);
+			}
+
+			fclose(fp);
+			file_size = new_stat.st_size;
+		}
 
 		if (FALSE == FindNextChangeNotification(h))
 		{

@@ -1,20 +1,20 @@
 #include <Windows.h>
 #include <tchar.h>
 #include <stdio.h>
-#include <Shlwapi.h>
+#include <string>
 
-#pragma comment(lib, "Shlwapi.lib")
+#ifdef UNICODE
+typedef std::wstring tstring;
+#else
+typedef std::string tstring;
+#endif
 
-bool get_config_file_name(TCHAR *config_file, unsigned int len)
+bool get_config_file_name(tstring &config_file)
 {
-	if (NULL == config_file)
-	{
-		_tprintf(L"config_file is null\n");
-		return false;
-	}
+	config_file.erase();
 
 	TCHAR path[_MAX_PATH] = { 0 };
-	if (!GetModuleFileName(NULL, path, sizeof(path)))
+	if (!GetModuleFileName(NULL, path, _MAX_PATH))
 	{
 		_tprintf(L"GetModuleFileName error: %d\n", GetLastError());
 		return false;
@@ -32,33 +32,30 @@ bool get_config_file_name(TCHAR *config_file, unsigned int len)
 		return false;
 	}
 
-	TCHAR config[_MAX_FNAME] = { 0 };
-	_tcscpy_s(config, drive);
-	_tcscat_s(config, dir);
-	_tcscat_s(config, file);
-	_tcscat_s(config, L".ini");
-
-	_tcscpy_s(config_file, len, config);
+	config_file += drive;
+	config_file += dir;
+	config_file += file;
+	config_file += L".ini";
 
 	return true;
 }
 
 bool config_file_exists()
 {
-	TCHAR config[_MAX_PATH] = { 0 };
-	get_config_file_name(config, _MAX_PATH);
+	tstring config;
+	get_config_file_name(config);
 
-	return (PathFileExists(config) ? true : false);
+	return (0 == _taccess_s(config.c_str(), 0) ? true : false);
 }
 
 void gen_config_template()
 {
-	TCHAR config[_MAX_PATH] = { 0 };
-	get_config_file_name(config, _MAX_PATH);
+	tstring config;
+	get_config_file_name(config);
 
 	FILE *fp = NULL;
 	errno_t err = 0;
-	err = _tfopen_s(&fp, config, L"w+");
+	err = _tfopen_s(&fp, config.c_str(), L"w+");
 	if (0 != err)
 	{
 		_tprintf(L"_tfopen_s error: %d\n", err);
@@ -79,50 +76,35 @@ void gen_config_template()
 	fclose(fp);
 }
 
-void query_info_from_config(TCHAR *path, unsigned int path_len, TCHAR *keyword, unsigned int keyword_len)
+void query_info_from_config(tstring &path, tstring &keyword)
 {
-	if (NULL == path || NULL == keyword)
-	{
-		_tprintf(L"path or keyword is null\n");
-		return;
-	}
+	tstring config;
+	get_config_file_name(config);
 
-	TCHAR config[_MAX_PATH] = { 0 };
-	get_config_file_name(config, _MAX_PATH);
+	TCHAR temp_path[_MAX_PATH] = { 0 };
+	TCHAR temp_keyword[_MAX_PATH] = { 0 };
+	GetPrivateProfileString(L"log_path", L"path", NULL, temp_path, _MAX_PATH, config.c_str());
+	GetPrivateProfileString(L"keyword_list", L"keyword", NULL, temp_keyword, _MAX_PATH, config.c_str());
 
-	GetPrivateProfileString(L"log_path", L"path", NULL, path, path_len, config);
-	GetPrivateProfileString(L"keyword_list", L"keyword", NULL, keyword, keyword_len, config);
+	path.erase();
+	keyword.erase();
+
+	path += temp_path;
+	keyword += temp_keyword;
 }
 
-void notify_keyword(TCHAR *path, unsigned int path_len, TCHAR *keyword, unsigned int keyword_len)
+void notify_keyword(const tstring &path, const tstring keyword)
 {
-	if (NULL == path || NULL == keyword)
-	{
-		_tprintf(L"path or keyword is null\n");
-		return;
-	}
-
-	TCHAR drive[_MAX_DRIVE] = { 0 };
-	TCHAR dir[_MAX_DIR] = { 0 };
-	errno_t err = 0;
-	err = _tsplitpath_s(path, drive, _MAX_DRIVE, dir, _MAX_DIR, NULL, 0, NULL, 0);
-	if (0 != err)
-	{
-		_tprintf(L"_tsplitpath_s error: %d\n", err);
-		return;
-	}
-
-	TCHAR target_dir[_MAX_FNAME] = { 0 };
-	_tcscpy_s(target_dir, drive);
-	_tcscat_s(target_dir, dir);
+	tstring target_dir;
+	target_dir = path.substr(0, path.find_last_of(L'\\'));
 
 	struct _stat last_stat = { 0 };
-	_tstat(path, &last_stat);
+	_tstat(path.c_str(), &last_stat);
 
 	_off_t file_size = last_stat.st_size;
 
 	HANDLE h = INVALID_HANDLE_VALUE;
-	h = FindFirstChangeNotification(target_dir, FALSE, FILE_NOTIFY_CHANGE_SIZE);
+	h = FindFirstChangeNotification(target_dir.c_str(), FALSE, FILE_NOTIFY_CHANGE_SIZE);
 	if (INVALID_HANDLE_VALUE == h)
 	{
 		_tprintf(L"FindFirstChangeNotification error: %d\n", GetLastError());
@@ -137,15 +119,15 @@ void notify_keyword(TCHAR *path, unsigned int path_len, TCHAR *keyword, unsigned
 		Sleep(50);
 
 		struct _stat new_stat = { 0 };
-		_tstat(path, &new_stat);
+		_tstat(path.c_str(), &new_stat);
 
 		if (file_size != new_stat.st_size)
 		{
-			_tprintf(L"%s changed, new size: %d\n", path, new_stat.st_size);
+			_tprintf(L"%s changed, new size: %d\n", path.c_str(), new_stat.st_size);
 
 			FILE *fp = NULL;
 			errno_t err = 0;
-			err = _tfopen_s(&fp, path, L"r");
+			err = _tfopen_s(&fp, path.c_str(), L"r");
 			if (0 != err)
 			{
 				// why sometimes error 13 (Permission denied)?
@@ -161,8 +143,8 @@ void notify_keyword(TCHAR *path, unsigned int path_len, TCHAR *keyword, unsigned
 			{
 				_fgetts(buff, 1024, fp);
 
-				if (_tcsstr(buff, keyword))
-					_tprintf(L"found \"%s\"\n", buff);
+				if (_tcsstr(buff, keyword.c_str()))
+					_tprintf(L"%s\n", buff);
 			}
 
 			fclose(fp);
@@ -184,26 +166,26 @@ int main()
 {
 	if (!config_file_exists())
 	{
-		TCHAR config[_MAX_PATH] = { 0 };
-		get_config_file_name(config, _MAX_PATH);
+		tstring config;
+		get_config_file_name(config);
 
 		_tprintf(L"config file not exists, now generate a new one in path:\n");
-		_tprintf(L"%s\nplease edit it and run program again.\n", config);
+		_tprintf(L"%s\nplease edit it and run program again.\n", config.c_str());
 
 		gen_config_template();
 		return -1;
 	}
 
-	TCHAR path[_MAX_PATH] = { 0 };
-	TCHAR keyword[_MAX_PATH] = { 0 };
-	query_info_from_config(path, _MAX_PATH, keyword, _MAX_PATH);
-	if (!(_tcslen(path) || _tcslen(keyword)))
+	tstring path;
+	tstring keyword;
+	query_info_from_config(path, keyword);
+	if (path.empty() || keyword.empty())
 	{
 		_tprintf(L"path or keyword in config file is empty\n");
 		return -1;
 	}
 
-	notify_keyword(path, _MAX_PATH, keyword, _MAX_PATH);
+	notify_keyword(path, keyword);
 
 	return 0;
 }

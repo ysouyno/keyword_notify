@@ -281,11 +281,10 @@ void notify_keyword(const std::vector<tstring> &path_vec, const std::vector<tstr
 {
 	for (std::vector<tstring>::const_iterator path_citer = path_vec.cbegin(); path_citer != path_vec.cend(); ++path_citer)
 	{
-		thread_param *ptp = new thread_param;
-		ptp->path = *path_citer;
-
 		for (std::vector<tstring>::const_iterator keyword_citer = keyword_vec.cbegin(); keyword_citer != keyword_vec.cend(); ++keyword_citer)
 		{
+			thread_param *ptp = new thread_param;
+			ptp->path = *path_citer;
 			ptp->keyword = *keyword_citer;
 
 			HANDLE h = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)thread_proc, ptp, 0, NULL);

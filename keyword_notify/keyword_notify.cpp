@@ -4,6 +4,7 @@
 #include <io.h> // for _taccess_s
 #include <map>
 #include <list>
+#include <signal.h>
 
 #ifdef UNICODE
 typedef std::wstring tstring;
@@ -13,6 +14,7 @@ typedef std::string tstring;
 
 const size_t max_files_count = 8;
 const size_t max_keywords_count = 8;
+static volatile bool running = true;
 
 bool get_config_file_name(tstring &config_file)
 {
@@ -87,16 +89,17 @@ void query_info_from_config(std::map<tstring, std::list<tstring> > &info_map)
 	get_config_file_name(config);
 
 	TCHAR app_name[_MAX_FNAME] = { 0 };
-	TCHAR temp_path[_MAX_PATH] = { 0 };
+	TCHAR target_file[_MAX_PATH] = { 0 };
 	for (int i = 0; i < max_files_count; ++i)
 	{
 		_stprintf_s(app_name, _T("target_file%d"), i + 1);
 
-		DWORD ret = GetPrivateProfileString(app_name, _T("path"), NULL, temp_path, _MAX_PATH, config.c_str());
+		DWORD ret = GetPrivateProfileString(app_name, _T("path"), NULL, target_file, _MAX_PATH,
+			config.c_str());
 		if (0 == ret)
 			break;
 
-		std::list<tstring> keyword_list;
+		std::list<tstring> keywords_list;
 
 		TCHAR key_name[_MAX_FNAME] = { 0 };
 		TCHAR temp_key[_MAX_FNAME] = { 0 };
@@ -104,15 +107,16 @@ void query_info_from_config(std::map<tstring, std::list<tstring> > &info_map)
 		{
 			_stprintf_s(key_name, _T("keyword%d"), j + 1);
 
-			DWORD ret = GetPrivateProfileString(app_name, key_name, NULL, temp_key, _MAX_FNAME, config.c_str());
+			DWORD ret = GetPrivateProfileString(app_name, key_name, NULL, temp_key, _MAX_FNAME,
+				config.c_str());
 			if (0 == ret)
 				break;
 
 			tstring str(temp_key);
-			keyword_list.push_back(str);
+			keywords_list.push_back(str);
 		}
 
-		info_map.insert(std::pair<tstring, std::list<tstring> >(temp_path, keyword_list));
+		info_map.insert(std::pair<tstring, std::list<tstring> >(target_file, keywords_list));
 	}
 }
 
@@ -121,6 +125,12 @@ typedef struct _thread_param
 	tstring path;
 	std::list<tstring> keywords_list;
 } thread_param, *pthread_param;
+
+enum
+{
+	event_handle = 0,
+	notification_handle
+};
 
 DWORD WINAPI thread_proc(LPVOID param)
 {
@@ -134,72 +144,92 @@ DWORD WINAPI thread_proc(LPVOID param)
 
 	_off_t file_size = last_stat.st_size;
 
-	HANDLE h = INVALID_HANDLE_VALUE;
-	h = FindFirstChangeNotification(target_dir.c_str(), FALSE, FILE_NOTIFY_CHANGE_SIZE);
-	if (INVALID_HANDLE_VALUE == h)
+	HANDLE h[2] = { 0 };
+	h[event_handle] = CreateEvent(NULL, TRUE, FALSE, _T("named_event"));
+
+	h[notification_handle] = FindFirstChangeNotification(target_dir.c_str(), FALSE,
+		FILE_NOTIFY_CHANGE_SIZE);
+	if (INVALID_HANDLE_VALUE == h[notification_handle])
 	{
 		_tprintf(_T("FindFirstChangeNotification error: %d\n"), GetLastError());
 		return -1;
 	}
 
+	DWORD wait_status = 0;
+
 	while (true)
 	{
-		WaitForSingleObject(h, INFINITE);
+		wait_status = WaitForMultipleObjects(2, h, FALSE, INFINITE);
 
 		// need to sleep before call _tstat, or open the file will fail
 		Sleep(50);
 
-		struct _stat new_stat = { 0 };
-		_tstat(pp->path.c_str(), &new_stat);
-
-		if (file_size != new_stat.st_size)
+		switch (wait_status)
 		{
-			_tprintf(_T("%s changed, new size: %d\n"), pp->path.c_str(), new_stat.st_size);
+		case WAIT_OBJECT_0 + event_handle:
+			_tprintf(_T("get stop event\n"));
+			delete pp;
+			CloseHandle(h[event_handle]);
+			FindCloseChangeNotification(h[notification_handle]);
+			return 0;
+		case WAIT_OBJECT_0 + notification_handle:
+			struct _stat new_stat = { 0 };
+			_tstat(pp->path.c_str(), &new_stat);
 
-			FILE *fp = NULL;
-			errno_t err = 0;
-			err = _tfopen_s(&fp, pp->path.c_str(), _T("r"));
-			if (0 != err)
+			if (file_size != new_stat.st_size)
 			{
-				// why sometimes error 13 (Permission denied)?
-				_tprintf(_T("_tfopen_s error: %d\n"), err);
-				continue;
-			}
+				_tprintf(_T("%s changed, new size: %d\n"), pp->path.c_str(), new_stat.st_size);
 
-			fseek(fp, file_size, SEEK_SET);
-
-			TCHAR buff[1024] = { 0 };
-
-			while (!feof(fp))
-			{
-				_fgetts(buff, 1024, fp);
-
-				for (std::list<tstring>::iterator iter = pp->keywords_list.begin(); iter != pp->keywords_list.end(); ++iter)
+				FILE *fp = NULL;
+				errno_t err = 0;
+				err = _tfopen_s(&fp, pp->path.c_str(), _T("r"));
+				if (0 != err)
 				{
-					if (_tcsstr(buff, iter->c_str()))
-						_tprintf(_T("%s\n"), buff);
+					// why sometimes error 13 (Permission denied)?
+					_tprintf(_T("_tfopen_s error: %d\n"), err);
+					continue;
 				}
+
+				fseek(fp, file_size, SEEK_SET);
+
+				TCHAR buff[1024] = { 0 };
+
+				while (!feof(fp))
+				{
+					_fgetts(buff, 1024, fp);
+
+					for (std::list<tstring>::iterator iter = pp->keywords_list.begin();
+						iter != pp->keywords_list.end(); ++iter)
+					{
+						if (_tcsstr(buff, iter->c_str()))
+							_tprintf(_T("%s\n"), buff);
+					}
+				}
+
+				fclose(fp);
+				file_size = new_stat.st_size;
 			}
 
-			fclose(fp);
-			file_size = new_stat.st_size;
-		}
-
-		if (FALSE == FindNextChangeNotification(h))
-		{
-			_tprintf(_T("FindNextChangeNotification error: %d\n"), GetLastError());
+			if (FALSE == FindNextChangeNotification(h[notification_handle]))
+			{
+				_tprintf(_T("FindNextChangeNotification error: %d\n"), GetLastError());
+				break;
+			}
 			break;
 		}
 	}
 
-	FindCloseChangeNotification(h);
 	delete pp;
+	CloseHandle(h[event_handle]);
+	FindCloseChangeNotification(h[notification_handle]);
+
 	return 0;
 }
 
 void notify_keyword(const std::map<tstring, std::list<tstring> > &info_map)
 {
-	for (std::map<tstring, std::list<tstring> >::const_iterator citer = info_map.cbegin(); citer != info_map.cend(); ++citer)
+	for (std::map<tstring, std::list<tstring> >::const_iterator citer = info_map.cbegin();
+		citer != info_map.cend(); ++citer)
 	{
 		thread_param *ptp = new thread_param;
 		ptp->path = citer->first;
@@ -209,6 +239,15 @@ void notify_keyword(const std::map<tstring, std::list<tstring> > &info_map)
 		if (NULL != h)
 			CloseHandle(h);
 	}
+}
+
+void signal_handler(int signal)
+{
+	HANDLE h_event = CreateEvent(NULL, TRUE, FALSE, _T("named_event"));
+	SetEvent(h_event);
+	CloseHandle(h_event);
+
+	running = false;
 }
 
 int main()
@@ -229,7 +268,16 @@ int main()
 	query_info_from_config(info_map);
 
 	notify_keyword(info_map);
-	getchar();
+
+	HANDLE h_event = CreateEvent(NULL, TRUE, FALSE, _T("named_event"));
+
+	signal(SIGINT, signal_handler);
+	while (running)
+		;
+
+	CloseHandle(h_event);
+	Sleep(1000);
+	_tprintf(_T("stopping\n"));
 
 	return 0;
 }

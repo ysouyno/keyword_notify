@@ -5,6 +5,7 @@
 #include <map>
 #include <list>
 #include <signal.h>
+#include <vector>
 
 #ifdef UNICODE
 typedef std::wstring tstring;
@@ -226,7 +227,7 @@ DWORD WINAPI thread_proc(LPVOID param)
 	return 0;
 }
 
-void notify_keyword(const std::map<tstring, std::list<tstring> > &info_map)
+void notify_keyword(const std::map<tstring, std::list<tstring> > &info_map, std::vector<HANDLE> &handle_vec)
 {
 	for (std::map<tstring, std::list<tstring> >::const_iterator citer = info_map.cbegin();
 		citer != info_map.cend(); ++citer)
@@ -237,7 +238,7 @@ void notify_keyword(const std::map<tstring, std::list<tstring> > &info_map)
 
 		HANDLE h = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)thread_proc, ptp, 0, NULL);
 		if (NULL != h)
-			CloseHandle(h);
+			handle_vec.push_back(h);
 	}
 }
 
@@ -267,7 +268,14 @@ int main()
 	std::map<tstring, std::list<tstring> > info_map;
 	query_info_from_config(info_map);
 
-	notify_keyword(info_map);
+	std::vector<HANDLE> handle_vec;
+	notify_keyword(info_map, handle_vec);
+
+	if (handle_vec.empty())
+	{
+		_tprintf(_T("no keywords to notify, now quit\n"));
+		return -1;
+	}
 
 	HANDLE h_event = CreateEvent(NULL, TRUE, FALSE, _T("named_event"));
 
@@ -275,9 +283,20 @@ int main()
 	while (running)
 		;
 
+	_tprintf(_T("theads stopping...\n"));
+
+	HANDLE h[max_files_count] = { 0 };
+	for (size_t i = 0; i < handle_vec.size(); ++i)
+		h[i] = handle_vec.at(i);
+
+	WaitForMultipleObjects((DWORD)handle_vec.size(), h, TRUE, 1000);
+
+	_tprintf(_T("all threads stopped\n"));
+
+	for (size_t i = 0; i < handle_vec.size(); ++i)
+		CloseHandle(h[i]);
+
 	CloseHandle(h_event);
-	Sleep(1000);
-	_tprintf(_T("stopping\n"));
 
 	return 0;
 }
